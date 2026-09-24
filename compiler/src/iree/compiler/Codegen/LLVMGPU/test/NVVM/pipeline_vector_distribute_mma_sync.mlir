@@ -72,3 +72,37 @@ func.func @matmul_256x256x256_f16_f16() attributes {hal.executable.target = #exe
 //       CHECK:   scf.for {{.*}} = %c0 to %c256 step %c32 iter_args({{.*}}) -> (vector<2x2xf16>)
 // CHECK-COUNT-2:   nvgpu.mma.sync({{.*}}) mmaShape = [16, 8, 16] : (vector<4x2xf16>, vector<2x2xf16>, vector<2x2xf16>) -> vector<2x2xf16>
 //       CHECK:     scf.yield
+
+// -----
+
+// FP8 m16n8k32: the lhs fragment holds 16 elements (4 per 32-bit register), not
+// the 8 of the f16 intrinsics.
+
+#executable_target_cuda = #hal.executable.target<"cuda", "cuda-nvptx-fb">
+#config_f8 = #iree_gpu.lowering_config<{workgroup = [32, 16, 0], reduction = [0, 0, 64], promote_operands = [0, 1], mma_kind = #iree_gpu.mma_layout<NV_MMA_SYNC_F32_16x8x32_F8E4M3FN>, subgroup_basis = [[2, 2, 1], [0, 1, 2]]}>
+#translation_f8 = #iree_codegen.translation_info<pipeline = #iree_gpu.pipeline<VectorDistribute> workgroup_size = [64, 2, 1] subgroup_size = 32, {gpu_pipeline_options = #iree_gpu.pipeline_options<prefetch_num_stages = 1, no_reduce_shared_memory_bank_conflicts = false>}>
+
+#pipeline_layout = #hal.pipeline.layout<bindings = [
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>
+]>
+func.func @matmul_256x256x256_f8_f32() attributes {hal.executable.target = #executable_target_cuda, translation_info = #translation_f8} {
+  %cst = arith.constant 0.000000e+00 : f32
+  %c0 = arith.constant 0 : index
+  %0 = hal.interface.binding.subspan layout(#pipeline_layout) binding(0) alignment(64) offset(%c0) flags(ReadOnly) : !iree_tensor_ext.dispatch.tensor<readonly:tensor<256x256xf8E4M3FN>>
+  %1 = hal.interface.binding.subspan layout(#pipeline_layout) binding(1) alignment(64) offset(%c0) flags(ReadOnly) : !iree_tensor_ext.dispatch.tensor<readonly:tensor<256x256xf8E4M3FN>>
+  %2 = hal.interface.binding.subspan layout(#pipeline_layout) binding(2) alignment(64) offset(%c0) : !iree_tensor_ext.dispatch.tensor<writeonly:tensor<256x256xf32>>
+  %3 = iree_tensor_ext.dispatch.tensor.load %0, offsets = [0, 0], sizes = [256, 256], strides = [1, 1] : !iree_tensor_ext.dispatch.tensor<readonly:tensor<256x256xf8E4M3FN>> -> tensor<256x256xf8E4M3FN>
+  %4 = iree_tensor_ext.dispatch.tensor.load %1, offsets = [0, 0], sizes = [256, 256], strides = [1, 1] : !iree_tensor_ext.dispatch.tensor<readonly:tensor<256x256xf8E4M3FN>> -> tensor<256x256xf8E4M3FN>
+  %5 = tensor.empty() : tensor<256x256xf32>
+  %6 = linalg.fill ins(%cst : f32) outs(%5 : tensor<256x256xf32>) -> tensor<256x256xf32>
+  %7 = linalg.matmul {lowering_config = #config_f8} ins(%3, %4 : tensor<256x256xf8E4M3FN>, tensor<256x256xf8E4M3FN>) outs(%6 : tensor<256x256xf32>) -> tensor<256x256xf32>
+  iree_tensor_ext.dispatch.tensor.store %7, %2, offsets = [0, 0], sizes = [256, 256], strides = [1, 1] : tensor<256x256xf32> -> !iree_tensor_ext.dispatch.tensor<writeonly:tensor<256x256xf32>>
+  return
+}
+
+// CHECK-LABEL: func.func @matmul_256x256x256_f8_f32()
+//       CHECK:   scf.for {{.*}} = %c0 to %c256 step %c64 iter_args({{.*}}) -> (vector<2x2xf32>)
+// CHECK-COUNT-2:   nvgpu.mma.sync({{.*}}) mmaShape = [16, 8, 32] : (vector<4x4xf8E4M3FN>, vector<2x4xf8E4M3FN>, vector<2x2xf32>) -> vector<2x2xf32>
+//       CHECK:     scf.yield

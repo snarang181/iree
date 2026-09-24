@@ -139,3 +139,41 @@ func.func @matmul_tile_and_fuse_mma_sync_bf16()
 // Verify nvgpu.mma.sync is generated with correct shape for BF16
 // CHECK-COUNT-8: nvgpu.mma.sync({{.*}}) mmaShape = [16, 8, 16] : ({{.*}}) -> vector<2x2xf32>
 //       CHECK:   scf.yield
+
+// -----
+
+// FP8 m16n8k32 through TileAndFuse, where the lhs fragment arrives as 2x1x2x4.
+
+#executable_target_cuda = #hal.executable.target<"cuda", "cuda-nvptx-fb">
+#pipeline_layout = #hal.pipeline.layout<bindings = [
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>
+]>
+#config_f8 = #iree_gpu.lowering_config<{
+  workgroup = [64, 64, 0],
+  reduction = [0, 0, 8],
+  subgroup = [2, 4],
+  mma_kind = #iree_gpu.mma_layout<NV_MMA_SYNC_F32_16x8x32_F8E4M3FN>,
+  promote_operands = [0, 1]
+}>
+func.func @matmul_tile_and_fuse_mma_sync_f8()
+  attributes {
+    hal.executable.target = #executable_target_cuda,
+    translation_info = #iree_codegen.translation_info<pipeline = #iree_gpu.pipeline<TileAndFuse> workgroup_size = [128, 1, 1] subgroup_size = 32>} {
+  %cst = arith.constant 0.000000e+00 : f32
+  %c0 = arith.constant 0 : index
+  %0 = hal.interface.binding.subspan layout(#pipeline_layout) binding(0) alignment(64) offset(%c0) flags(ReadOnly) : !iree_tensor_ext.dispatch.tensor<readonly:tensor<2048x1280xf8E4M3FN>>
+  %1 = hal.interface.binding.subspan layout(#pipeline_layout) binding(1) alignment(64) offset(%c0) flags(ReadOnly) : !iree_tensor_ext.dispatch.tensor<readonly:tensor<1280x10240xf8E4M3FN>>
+  %2 = hal.interface.binding.subspan layout(#pipeline_layout) binding(2) alignment(64) offset(%c0) : !iree_tensor_ext.dispatch.tensor<writeonly:tensor<2048x10240xf32>>
+  %3 = iree_tensor_ext.dispatch.tensor.load %0, offsets = [0, 0], sizes = [2048, 1280], strides = [1, 1] : !iree_tensor_ext.dispatch.tensor<readonly:tensor<2048x1280xf8E4M3FN>> -> tensor<2048x1280xf8E4M3FN>
+  %4 = iree_tensor_ext.dispatch.tensor.load %1, offsets = [0, 0], sizes = [1280, 10240], strides = [1, 1] : !iree_tensor_ext.dispatch.tensor<readonly:tensor<1280x10240xf8E4M3FN>> -> tensor<1280x10240xf8E4M3FN>
+  %5 = tensor.empty() : tensor<2048x10240xf32>
+  %6 = linalg.fill ins(%cst : f32) outs(%5 : tensor<2048x10240xf32>) -> tensor<2048x10240xf32>
+  %7 = linalg.matmul {lowering_config = #config_f8} ins(%3, %4 : tensor<2048x1280xf8E4M3FN>, tensor<1280x10240xf8E4M3FN>) outs(%6 : tensor<2048x10240xf32>) -> tensor<2048x10240xf32>
+  iree_tensor_ext.dispatch.tensor.store %7, %2, offsets = [0, 0], sizes = [2048, 10240], strides = [1, 1] : tensor<2048x10240xf32> -> !iree_tensor_ext.dispatch.tensor<writeonly:tensor<2048x10240xf32>>
+  return
+}
+
+// CHECK-LABEL: func @matmul_tile_and_fuse_mma_sync_f8
+// CHECK-COUNT-8: nvgpu.mma.sync({{.*}}) mmaShape = [16, 8, 32] : (vector<4x4xf8E4M3FN>, vector<2x4xf8E4M3FN>, vector<2x2xf32>) -> vector<2x2xf32>

@@ -1260,17 +1260,20 @@ static Value createMmaOp(OpBuilder &builder, Location loc,
   }
   if (isNvMmaSync(intrinsic)) {
     // Transpose the two outer dimensions to model the column-major register
-    // ordering expected by mma.sync. The input shape differs between pipelines:
-    // VectorDistribute produces 2x2x1x2, TileAndFuse produces 2x1x2x2.
-    // Remove the unit dimension to simplify the transpose.
-    // Preserve the operand element type so BF16 fragments are not reshaped as
-    // f16.
-    Type elementType = cast<VectorType>(lhs.getType()).getElementType();
-    auto nonUnitVecType = VectorType::get({2, 2, 2}, elementType);
+    // ordering expected by mma.sync. The lhs fragment is four 32-bit registers
+    // arranged 2x2, each packing 32 / bitwidth elements (2 for f16/bf16, 4 for
+    // FP8); its rank differs between pipelines, so reshape it to 2x2xK first.
+    auto lhsType = cast<VectorType>(lhs.getType());
+    int64_t elementsPerRegister =
+        32 / lhsType.getElementType().getIntOrFloatBitWidth();
+    assert(lhsType.getNumElements() == 4 * elementsPerRegister &&
+           "expected a four-register lhs fragment");
+    auto fragmentType =
+        VectorType::get({2, 2, elementsPerRegister}, lhsType.getElementType());
     auto reshaped =
-        vector::ShapeCastOp::create(builder, loc, nonUnitVecType, lhs);
+        vector::ShapeCastOp::create(builder, loc, fragmentType, lhs);
     auto permAttr = builder.getDenseI64ArrayAttr({1, 0, 2});
-    auto transposed = vector::TransposeOp::create(builder, loc, nonUnitVecType,
+    auto transposed = vector::TransposeOp::create(builder, loc, fragmentType,
                                                   reshaped, permAttr);
     lhs = vector::ShapeCastOp::create(builder, loc, lhs.getType(), transposed);
     Attribute mmaShape[] = {builder.getI64IntegerAttr(layout.mSize),
